@@ -8,16 +8,20 @@ import numpy as np
 import networkx as nx
 import polars as pl
 from functools import partial
-import concurrent.futures
 from itertools import product
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
 from torch_geometric_temporal.signal import temporal_signal_split
 from torch_geometric_temporal.signal import StaticGraphTemporalSignal
+
 from models.gcn_based_rnn_model import GCRN
 from models.gcn_based_lstm_model import GCLSTM
 from models.dcrnn_model import DCRN
+from models.stgcn_model import STGCN
+from models.TemporalLSTM_model import TemporalLSTM
+from models.TimesFM_model import TimesFMModel
+from models.stsgt_model import STSGT
 
 
 # import sys
@@ -26,7 +30,9 @@ from models.dcrnn_model import DCRN
 # from gcn_based_rnn_model import GCRN
 # from gcn_based_lstm_model import GCLSTM
 # from dcrnn_model import DCRN
-
+# from stgcn_model import STGCN
+# from TemporalLSTM_model import TemporalLSTM
+# from TimesFM_model import TimesFMModel
 
 def extract_backbone(graph, alpha, g_strength=None, g_degree=None, ignored_nodes={}):
     backbone = nx.Graph()
@@ -83,7 +89,7 @@ def construindo_rede_mobilidade(pasta_raw_data, pasta_pre_processed, backbone=Fa
         caminho_grafo = os.path.join(pasta_pre_processed, f'grafo.pkl')
 
     # Verifica se os arquivos já existem
-    if os.path.exists(caminho_edges) and os.path.exists(caminho_weights) and os.path.exists(caminho_grafo) and\
+    if os.path.exists(caminho_edges) and os.path.exists(caminho_weights) and os.path.exists(caminho_grafo) and \
             os.path.exists(caminho_codigos) and os.path.exists(caminho_mapeamento):
         print("Carregando dados pré-processados...")
         edges = np.load(caminho_edges)
@@ -504,6 +510,17 @@ def processar_iteracao(args, edges, weights, pasta_results, dataset, pop_norm, d
         model = GCLSTM(in_channels=lag, out_channels=filters, K=K, out=out, num_classes=2, task_type=task_type)
     elif nameModel == 'DCRN':
         model = DCRN(in_channels=lag, out_channels=filters, K=K, out=out, num_classes=2, task_type=task_type)
+    elif nameModel == 'STGCN':
+        model = STGCN(in_channels=lag, out_channels=filters, num_nodes=len(pop_norm), K=K, out=out, num_classes=2,
+                      task_type=task_type)
+    elif nameModel == 'LSTM':
+        model = TemporalLSTM(in_channels=lag, out_channels=filters, out=out, num_classes=2, task_type=task_type)
+    elif nameModel == 'Timesfm':
+        model = TimesFMModel(in_channels=lag, out_channels=filters, out=out, num_classes=2, task_type=task_type)
+    # elif nameModel == 'STSGT':
+    #     model = STSGT(in_channels=lag, out_channels=filters, out=out, num_classes=2, task_type=task_type)
+    # elif nameModel == 'Dumb':
+    #     model = Dumb(in_channels=lag, out_channels=filters, K=K, out=out, num_classes=2, task_type=task_type)
 
     # Mova o modelo para a GPU
     model.to(device)
@@ -684,11 +701,12 @@ if __name__ == "__main__":
     train_ratio = 0.8  # 80% dos dados para treino
     reps = 2  # 2 repetições
     K = 2  # 2 pulos
-    filters = 64  # 64 filtros
+    filters = 64  # TODO :: 32, 64, 128, ?256, 512
     lr = 0.01  # taxa de aprendizado
     epochs = 100  # 100 épocas
 
-    namemodels = ['GCRN', 'GCLSTM']  # 'GCRN', 'GCLSTM', 'DCRN'
+    namemodels = ['GCRN', 'GCLSTM', 'DCRN', 'STGCN', 'LSTM', 'Dumb', 'Timesfm', 'STSGT']
+    # 'GCRN', 'GCLSTM', 'DCRN', 'STGCN', 'LSTM', 'Timesfm', 'Dumb', 'STSGT'
 
     # Verifique se a MPS está disponível
     if torch.backends.mps.is_available():
@@ -704,71 +722,13 @@ if __name__ == "__main__":
     # Iterável dos valores de lags e outs
     iteravel = product(range(1, lags + 1), range(1, outs + 1), namemodels, range(reps))
 
-    # Função parcial com os parâmetros que serão iterados pelo executor.map()
-    partial_processar_iteracao = partial(processar_iteracao, edges=edges, weights=weights, pasta_results=pasta_results,
-                                         dataset=dataset, pop_norm=pop_norm, device=device, filters=filters, K=K, lr=lr,
-                                         epochs=epochs, train_ratio=train_ratio, task_type=task_type)
-
-    # Crie um pool de threads
-    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
-        # Mapeie a função para todas as combinações de lag e out usando o pool de threads
-        executor.map(partial_processar_iteracao, iteravel)
+    # # Função parcial com os parâmetros que serão iterados pelo executor.map()
+    # partial_processar_iteracao = partial(processar_iteracao, edges=edges, weights=weights, pasta_results=pasta_results,
+    #                                      dataset=dataset, pop_norm=pop_norm, device=device, filters=filters, K=K, lr=lr,
+    #                                      epochs=epochs, train_ratio=train_ratio, task_type=task_type)
 
     # for item in iteravel:
     #     partial_processar_iteracao(item)
 
-    # import torch.multiprocessing as mp
-    #
-    # # mp.set_start_method('spawn', force=True)  # Set start method before creating processes
-    # # torch.cuda.set_per_process_memory_fraction(1/8, device=device)
-    # processes = []
-    # for i, iter in enumerate(iteravel):
-    #     p = mp.Process(target=processar_iteracao, args=(iter, edges, weights,
-    #                                                     pasta_results, dataset,
-    #                                                     pop_norm, device, filters,
-    #                                                     K, lr, epochs, train_ratio,
-    #                                                     task_type), name=f"Iteração-{i}")
-    #     p.start()
-    #     processes.append(p)
-    #     print(f"Iniciado {p.name}")
-    # # Aguarda a conclusão de todos os processos
-    # for p in processes:
-    #     p.join()
-    #     print(f"Terminado {p.name}")
-    # print("Todos os processos terminaram.")
-
-    # processes = []
-    # queue = mp.Queue()  # Create a queue to manage tasks
-    #
-    # # Function to manage worker processes
-    # def worker(queue):
-    #     while True:
-    #         iter = queue.get()  # Get an iteration from the queue
-    #         if iter is None:  # Check for termination signal
-    #             break
-    #         processar_iteracao(iter, edges, weights, pasta_results, dataset, pop_norm, device, filters, K, lr, epochs,
-    #                            train_ratio, task_type)
-    #         queue.task_done()  # Signal completion of the task
-    #
-    #
-    # # Spawn worker processes (up to 8)
-    # for _ in range(min(8, mp.cpu_count() // 2)):  # Limit to half the CPU cores to avoid overload
-    #     p = mp.Process(target=worker, args=(queue,))
-    #     p.start()
-    #
-    # # Add iterations to the queue for processing
-    # for i, iter in enumerate(iteravel):
-    #     queue.put(iter)  # Add iteration to the task queue
-    #
-    # # Wait for all tasks to finish
-    # queue.join()
-    #
-    # # Send termination signal to workers
-    # for _ in range(min(8, mp.cpu_count() // 2)):
-    #     queue.put(None)  # Add None to signal termination
-    #
-    # # Wait for worker processes to finish
-    # for p in processes:
-    #     p.join()
-    #
-    # print("Todos os processos terminaram.")
+    processar_iteracao((14, 14, 'STGCN', 0), edges, weights, pasta_results, dataset, pop_norm, device, filters=filters,
+                       K=K, lr=lr, epochs=epochs, train_ratio=train_ratio, task_type=task_type)
