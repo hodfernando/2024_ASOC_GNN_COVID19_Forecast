@@ -15,9 +15,13 @@ import torch
 import torch.nn.functional as F
 from torch_geometric_temporal.signal import temporal_signal_split
 from torch_geometric_temporal.signal import StaticGraphTemporalSignal
+
 from models.gcn_based_rnn_model import GCRN
 from models.gcn_based_lstm_model import GCLSTM
 from models.dcrnn_model import DCRN
+from models.stgcn_model import STGCN
+from models.TemporalLSTM_model import TemporalLSTM
+from models.TimesFM_model import TimesFMModel
 
 
 # import sys
@@ -26,6 +30,9 @@ from models.dcrnn_model import DCRN
 # from gcn_based_rnn_model import GCRN
 # from gcn_based_lstm_model import GCLSTM
 # from dcrnn_model import DCRN
+# from stgcn_model import STGCN
+# from TemporalLSTM_model import TemporalLSTM
+# from TimesFM_model import TimesFMModel
 
 def extract_backbone(graph, alpha, g_strength=None, g_degree=None, ignored_nodes={}):
     backbone = nx.Graph()
@@ -222,7 +229,7 @@ def construindo_dataframe_common_dates(df_covid_temporal, date_networks, df_netw
     return df_common_dates
 
 
-def construir_grafo_temporal(networks_dir, df_common_dates, df_covid_temporal, dataset_in_out='in'):
+def construir_grafo_temporal(networks_dir, df_common_dates, df_covid_temporal, dataset_in_out='in', cumulativo=True):
     """
     Constrói o grafo espaço-temporal usando os dados de redes e COVID-19.
 
@@ -230,8 +237,8 @@ def construir_grafo_temporal(networks_dir, df_common_dates, df_covid_temporal, d
         networks_dir (str): O diretório contendo os arquivos de redes.
         df_common_dates (polars.DataFrame): O DataFrame contendo as datas comuns entre os arquivos de redes e os dados de COVID-19.
         df_covid_temporal (polars.DataFrame): O DataFrame contendo os dados de COVID-19.
-        save_path (str): O diretório onde os DataFrames serão salvos.
         dataset_in_out (str, optional): O tipo de conjunto de dados a ser usado, 'in' para entrada e 'out' para saída. Defaults to 'in'.
+        cumulativo (bool, optional): Se True, retorna os dados cumulativos. Se False, retorna os dados diários. Defaults to True.
 
     Returns:
         tuple: Um par de DataFrames contendo o índice das cidades e o grafo espaço-temporal.
@@ -245,7 +252,7 @@ def construir_grafo_temporal(networks_dir, df_common_dates, df_covid_temporal, d
 
     # Carregar o DataFrame com a população da China
     df_pop_china = pl.read_excel(source=os.path.join(pasta_raw_data, "worldcities.xlsx"),
-                                 engine="xlsx2csv", read_options={"has_header": True})
+                                engine="xlsx2csv", read_options={"has_header": True})
 
     # Filtrar por país "China" e por população maior que zero
     df_china = df_pop_china.filter(
@@ -264,29 +271,29 @@ def construir_grafo_temporal(networks_dir, df_common_dates, df_covid_temporal, d
     # Retirar as linhas duplicadas
     df_index = df_index.group_by('City_EN').agg(pl.first('*'))
 
-    # Aplique o filtro no DataFrame df_covid_temporal
+    # Aplicar o filtro no DataFrame df_covid_temporal
     df_graph_temporal = df_covid_temporal.filter(df_covid_temporal['City_name'].is_in(df_index['City_EN']) &
-                                                 df_covid_temporal['City_name'].is_in(df_china['city_ascii']))
+                                               df_covid_temporal['City_name'].is_in(df_china['city_ascii']))
 
-    # Crie um filtro para selecionar apenas as cidades presentes no df_graph_temporal
+    # Criar um filtro para selecionar apenas as cidades presentes no df_graph_temporal
     index_filter = df_index['City_EN'].is_in(df_graph_temporal['City_name'])
 
-    # Aplique o filtro no DataFrame df_index
+    # Aplicar o filtro no DataFrame df_index
     df_index = df_index.filter(index_filter)
 
     # Seleciona apenas as colunas (Datas) que são comuns a ambos os DataFrames
     common_columns = ['City_name', 'City_code'] + df_common_dates['date_networks'].to_list()
     df_graph_temporal = df_graph_temporal[common_columns]
 
-    # Selecionar as colunas desejadas e aplicar a soma cumulativa horizontal
-    cumulative_sum = df_graph_temporal.select(pl.cum_sum_horizontal(common_columns[2:])).unnest('cum_sum')
+    # Aplicar soma cumulativa apenas se cumulativo=True
+    if cumulativo:
+        # Selecionar as colunas desejadas e aplicar a soma cumulativa horizontal
+        cumulative_sum = df_graph_temporal.select(pl.cum_sum_horizontal(common_columns[2:])).unnest('cum_sum')
+        # Substituir as colunas originais pelas selecionadas juntamente com as colunas cumulativas
+        df_graph_temporal = df_graph_temporal.select(common_columns[:2]).with_columns(cumulative_sum)
 
-    # Substituir as colunas originais pelas selecionadas juntamente com as colunas cumulativas
-    df_graph_temporal = df_graph_temporal.select(common_columns[:2]).with_columns(cumulative_sum)
-
-    # Reordena o DataFrame por 'City_name'
+    # Reordenar os DataFrames por 'City_name'/'City_EN'
     df_index = df_index.sort('City_EN')
-    # Reordena o DataFrame por 'City_name'
     df_graph_temporal = df_graph_temporal.sort('City_name')
 
     return df_index, df_graph_temporal
@@ -660,6 +667,17 @@ def processar_iteracao(args, edges, weights, pasta_results, dataset, pop_norm, d
         model = GCLSTM(in_channels=lag, out_channels=filters, K=K, out=out, num_classes=2, task_type=task_type)
     elif nameModel == 'DCRN':
         model = DCRN(in_channels=lag, out_channels=filters, K=K, out=out, num_classes=2, task_type=task_type)
+    elif nameModel == 'STGCN':
+        model = STGCN(in_channels=lag, out_channels=filters, num_nodes=len(pop_norm), K=K, out=out, num_classes=2,
+                      task_type=task_type)
+    elif nameModel == 'LSTM':
+        model = TemporalLSTM(in_channels=lag, out_channels=filters, out=out, num_classes=2, task_type=task_type)
+    elif nameModel == 'Timesfm':
+        model = TimesFMModel(in_channels=lag, out_channels=filters, out=out, num_classes=2, task_type=task_type)
+    # elif nameModel == 'STSGT':
+    #     model = STSGT(in_channels=lag, out_channels=filters, out=out, num_classes=2, task_type=task_type)
+    # elif nameModel == 'Dumb':
+    #     model = Dumb(in_channels=lag, out_channels=filters, K=K, out=out, num_classes=2, task_type=task_type)
 
     # Mova o modelo para a GPU
     model.to(device)
@@ -843,7 +861,8 @@ if __name__ == "__main__":
     lr = 0.01  # taxa de aprendizado
     epochs = 100  # 100 épocas
 
-    namemodels = ['GCRN', 'GCLSTM']  # 'GCRN', 'GCLSTM', 'DCRN'
+    namemodels = ['GCRN', 'GCLSTM', 'DCRN', 'STGCN', 'LSTM', 'Dumb', 'Timesfm', 'STSGT']
+    # 'GCRN', 'GCLSTM', 'DCRN', 'STGCN', 'LSTM', 'Timesfm', 'Dumb', 'STSGT'
 
     # Verifique se a MPS está disponível
     if torch.backends.mps.is_available():
@@ -869,5 +888,8 @@ if __name__ == "__main__":
     #     # Mapeie a função para todas as combinações de lag e out usando o pool de threads
     #     executor.map(partial_processar_iteracao, iteravel)
 
-    for item in iteravel:
-        partial_processar_iteracao(item)
+    # for item in iteravel:
+    #     partial_processar_iteracao(item)
+
+    processar_iteracao((14, 14, 'STGCN', 0), edges, weights, pasta_results, dataset, pop_norm, device, filters=filters,
+                       K=K, lr=lr, epochs=epochs, train_ratio=train_ratio, task_type=task_type)
